@@ -1,0 +1,15 @@
+# Python
+backend/venv/
+backend/**/__pycache__/
+__pycache__/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Large trained model
+backend/model/resnet50v2_eurosat.keras
+
+# Generated application files
+backend/static/uploads/
+backend/static/heatmaps/

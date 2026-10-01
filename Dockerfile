@@ -34,4 +34,4 @@ ENV PORT=10000
 EXPOSE 10000
 
 # Start production WSGI server with Gunicorn (expands Render's PORT environment variable)
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-10000} --workers 2 --timeout 120 app:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-10000} --workers 1 --timeout 120 app:app"]

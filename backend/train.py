@@ -13,7 +13,10 @@ keras.utils.set_random_seed(42)
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_DIR = os.path.join(BASE_DIR, "..", "..", "EuroSAT")
+LOCAL_DATASET_DIR = os.path.normpath(os.path.join(BASE_DIR, "..", "EuroSAT"))
+PARENT_DATASET_DIR = os.path.normpath(os.path.join(BASE_DIR, "..", "..", "EuroSAT"))
+DATASET_DIR = LOCAL_DATASET_DIR if os.path.exists(os.path.join(LOCAL_DATASET_DIR, "train.csv")) else PARENT_DATASET_DIR
+
 MODEL_DIR = os.path.join(BASE_DIR, "model")
 os.makedirs(MODEL_DIR, exist_ok=True)
 

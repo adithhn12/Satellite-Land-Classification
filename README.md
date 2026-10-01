@@ -45,7 +45,13 @@ An AI-powered web application and GIS framework for classifying satellite images
 
 ## 🚀 How to Run the Project
 
-### 1. Backend Server (Flask + PyTorch / Keras)
+### 1. Download Model & EuroSAT Dataset (First Time Setup)
+```powershell
+# Run from project/ root directory (skips download if model & dataset already exist)
+python setup_assets.py
+```
+
+### 2. Backend Server (Flask + PyTorch / Keras)
 ```powershell
 cd backend
 # Run with virtual environment Python
@@ -53,7 +59,7 @@ cd backend
 ```
 * The API server will start on [http://localhost:5000](http://localhost:5000).
 
-### 2. Frontend Application (React + Vite + Tailwind)
+### 3. Frontend Application (React + Vite + Tailwind)
 ```powershell
 cd frontend
 npm run dev

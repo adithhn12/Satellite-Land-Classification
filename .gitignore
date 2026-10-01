@@ -8,8 +8,10 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 
-# Heavy Deep Learning Model Weights (>100MB, excluded from GitHub)
+# Heavy Deep Learning Model Weights & Datasets (>50MB, excluded from GitHub)
 backend/model/*.keras
+EuroSAT/
+EuroSAT.zip
 
 # Generated application upload and output files
 backend/static/uploads/*

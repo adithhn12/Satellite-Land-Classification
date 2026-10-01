@@ -33,5 +33,5 @@ COPY --from=frontend-builder /app/frontend/dist ./static/dist
 ENV PORT=5000
 EXPOSE 5000
 
-# Start production WSGI server with Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "app:app"]
+# Start production WSGI server with Gunicorn (expands Render's PORT environment variable)
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-5000} --workers 2 --timeout 120 app:app"]

@@ -48,7 +48,7 @@ ChartJS.register(
   Legend
 );
 
-const API_BASE = "http://localhost:5000";
+const API_BASE = import.meta.env.VITE_API_BASE || (window.location.origin.includes('localhost:5173') ? 'http://localhost:5000' : window.location.origin);
 
 const CLASSES = [
   "AnnualCrop", "Forest", "HerbaceousVegetation", "Highway", 

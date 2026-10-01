@@ -18,7 +18,9 @@ import {
   HelpCircle,
   ArrowRight,
   TrendingUp,
-  FileSpreadsheet
+  FileSpreadsheet,
+  AlertTriangle,
+  Check
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -55,16 +57,16 @@ const CLASSES = [
 ];
 
 const CLASS_COLORS = {
-  AnnualCrop: "#86efac", // Light Green
-  Forest: "#15803d", // Dark Green
-  HerbaceousVegetation: "#4ade80", // Medium Green
-  Highway: "#64748b", // Slate
-  Industrial: "#a21caf", // Purple
-  Pasture: "#bef264", // Lime Green
-  PermanentCrop: "#22c55e", // Green
-  Residential: "#f97316", // Orange
-  River: "#3b82f6", // Blue
-  SeaLake: "#1e3a8a" // Navy Blue
+  AnnualCrop: "#86efac",
+  Forest: "#15803d",
+  HerbaceousVegetation: "#4ade80",
+  Highway: "#64748b",
+  Industrial: "#a21caf",
+  Pasture: "#bef264",
+  PermanentCrop: "#22c55e",
+  Residential: "#f97316",
+  River: "#3b82f6",
+  SeaLake: "#1e3a8a"
 };
 
 const CLASS_DESC = {
@@ -89,8 +91,8 @@ function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [history, setHistory] = useState([]);
   const [analytics, setAnalytics] = useState(null);
-  const [loading, setLoading] = useState(false);
   const [training, setTraining] = useState(false);
+  const [evaluatingExt, setEvaluatingExt] = useState(false);
   const [message, setMessage] = useState(null);
 
   // Single Predict Page State
@@ -119,8 +121,6 @@ function App() {
   const [analyzingGrid, setAnalyzingGrid] = useState(false);
   const [hoveredGridCell, setHoveredGridCell] = useState(null);
 
-
-
   // History Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [classFilter, setClassFilter] = useState('');
@@ -129,8 +129,6 @@ function App() {
     fetchHistory();
     fetchAnalytics();
   }, []);
-
-
 
   const handleGridUpload = (e) => {
     const file = e.target.files[0];
@@ -155,7 +153,7 @@ function App() {
       const data = await res.json();
       if (data.predictions) {
         setGridResult(data);
-        showNotification("Grid classification completed successfully!", "success");
+        showNotification("Multi-scale grid slicing classification completed!", "success");
       } else {
         showNotification(data.message || "Failed to classify grid", "error");
       }
@@ -190,23 +188,50 @@ function App() {
     }
   };
 
+  const triggerEvalExternal = async () => {
+    setEvaluatingExt(true);
+    showNotification("Evaluating model on external validation images...", "info");
+    try {
+      const res = await fetch(`${API_BASE}/eval_external`, { method: "POST" });
+      const data = await res.json();
+      if (data.status === "success" || data.external_accuracy) {
+        showNotification(`External Evaluation Complete! Accuracy: ${data.external_accuracy}`, "success");
+        fetchAnalytics();
+      } else {
+        showNotification(data.message || "External evaluation notice", "info");
+      }
+    } catch (err) {
+      showNotification("Error connecting to external evaluation endpoint", "error");
+    } finally {
+      setEvaluatingExt(false);
+    }
+  };
+
   const showNotification = (text, type = "success") => {
     setMessage({ text, type });
     setTimeout(() => setMessage(null), 5000);
   };
 
-  const handleTrain = async (quick = true) => {
+  const handleTrain = async (mode = "demo") => {
+    const isProduction = mode === "production";
+    const confirmMsg = isProduction 
+      ? "Are you sure you want to train the PRODUCTION model? This will run full training and update the primary model file (resnet50v2_eurosat.keras)." 
+      : "Start Quick Trial training? (This will train a demo model without overwriting the production model).";
+    
+    if (!confirm(confirmMsg)) return;
+
     setTraining(true);
-    showNotification(`Model training initiated in ${quick ? 'Quick Demo' : 'Full'} mode. Please wait...`, "info");
+    showNotification(`Initiated ${isProduction ? 'PRODUCTION' : 'DEMO'} model training. Please wait...`, "info");
     try {
       const res = await fetch(`${API_BASE}/train`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ quick })
+        body: JSON.stringify({ mode, quick: !isProduction })
       });
       const data = await res.json();
       if (data.status === "success") {
-        showNotification(`Training completed successfully! Accuracy: ${data.accuracy}`, "success");
+        const acc = data.metrics?.accuracy || "Complete";
+        showNotification(`${isProduction ? 'Production' : 'Demo'} training completed! Test Accuracy: ${acc}`, "success");
         fetchAnalytics();
       } else {
         showNotification(`Training failed: ${data.message}`, "error");
@@ -256,7 +281,6 @@ function App() {
 
   const handleBatchUpload = (e) => {
     const files = Array.from(e.target.files);
-    console.log("handleBatchUpload: selected files:", files);
     if (files.length > 0) {
       setBatchFiles(files);
       setBatchResults([]);
@@ -265,7 +289,6 @@ function App() {
 
   const triggerBatchPredict = async () => {
     if (batchFiles.length === 0) return;
-    console.log("triggerBatchPredict: sending files:", batchFiles);
     setAnalyzingBatch(true);
     const formData = new FormData();
     batchFiles.forEach(file => {
@@ -341,9 +364,9 @@ function App() {
   const exportBatchToCSV = () => {
     if (batchResults.length === 0) return;
     let csvContent = "data:text/csv;charset=utf-8,";
-    csvContent += "Image Name,Prediction,Confidence (%)\n";
+    csvContent += "Image Name,Prediction,Confidence (%),Uncertainty Flag\n";
     batchResults.forEach(r => {
-      csvContent += `"${r.image_name}","${r.prediction}",${r.confidence}\n`;
+      csvContent += `"${r.image_name}","${r.prediction}",${r.confidence},"${r.is_low_confidence ? 'Uncertain' : 'High'}"\n`;
     });
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
@@ -354,7 +377,6 @@ function App() {
     document.body.removeChild(link);
   };
 
-  // Filtered History
   const filteredHistory = history.filter(item => {
     const matchesSearch = item.image_name.toLowerCase().includes(searchQuery.toLowerCase()) || 
                           item.prediction.toLowerCase().includes(searchQuery.toLowerCase());
@@ -362,12 +384,15 @@ function App() {
     return matchesSearch && matchesClass;
   });
 
-  // KPI Metrics Calculation
   const totalAnalyzed = history.length;
   const avgConf = history.length > 0 ? (history.reduce((acc, h) => acc + h.confidence, 0) / history.length).toFixed(1) : "0.0";
-  const modelAccuracy = analytics?.model_metrics?.accuracy || "94.2%";
+  
+  const modelMetrics = analytics?.model_metrics;
+  const prodAccuracy = modelMetrics?.evaluated ? modelMetrics.accuracy : "Not Evaluated";
 
-  // Setup Chart Data
+  const extMetrics = analytics?.external_metrics;
+  const extAccuracy = extMetrics?.status === "success" ? extMetrics.external_accuracy : "No Data";
+
   const getPieChartData = () => {
     if (!analytics || !analytics.class_distribution) return { labels: [], datasets: [] };
     const labels = Object.keys(analytics.class_distribution);
@@ -437,7 +462,7 @@ function App() {
           <Map className="w-8 h-8 text-blue-600" />
           <div>
             <h1 className="text-base font-bold leading-tight font-display tracking-tight text-slate-900">GIS Satellite</h1>
-            <p className="text-xs text-blue-600 font-medium">Land Classification</p>
+            <p className="text-xs text-blue-600 font-medium">Land Cover System</p>
           </div>
         </div>
 
@@ -449,7 +474,7 @@ function App() {
             { id: 'batch', label: 'Batch Processing', icon: Layers },
             { id: 'change', label: 'Change Detection', icon: RefreshCw },
             { id: 'history', label: 'Prediction Logs', icon: History },
-            { id: 'analytics', label: 'Analytics Panel', icon: BarChart3 },
+            { id: 'analytics', label: 'Analytics & Validation', icon: BarChart3 },
           ].map(tab => (
             <button
               key={tab.id}
@@ -467,7 +492,7 @@ function App() {
         </nav>
 
         <div className="p-4 border-t border-slate-200 bg-slate-50 text-center">
-          <p className="text-xs text-slate-400 font-mono">MCA Project v1.0.0</p>
+          <p className="text-xs text-slate-400 font-mono">MCA Project v2.0</p>
         </div>
       </aside>
 
@@ -480,11 +505,11 @@ function App() {
             <h2 className="text-xl font-bold tracking-tight text-slate-800 font-display">
               {activeTab === 'dashboard' && 'Dashboard Overview'}
               {activeTab === 'classify' && 'Satellite Classification & Grad-CAM'}
-              {activeTab === 'grid' && 'Grid Land-Cover Slicing'}
+              {activeTab === 'grid' && 'Overlapping Multi-Scale Grid Classifier'}
               {activeTab === 'batch' && 'Batch Image Processing'}
-              {activeTab === 'change' && 'GIS Change Detection'}
+              {activeTab === 'change' && 'GIS Temporal Change Detection'}
               {activeTab === 'history' && 'Classification Records'}
-              {activeTab === 'analytics' && 'Training & Distribution Analytics'}
+              {activeTab === 'analytics' && 'EuroSAT & External Validation Analytics'}
             </h2>
           </div>
 
@@ -527,18 +552,18 @@ function App() {
               {/* KPI Cards Grid */}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                 {[
-                  { label: "Total Classified Images", value: totalAnalyzed, desc: "Cumulative database uploads", icon: Layers, color: "text-blue-600 bg-blue-50 border-blue-100" },
-                  { label: "EuroSAT Model Accuracy", value: modelAccuracy, desc: "Evaluated on validation sets", icon: Cpu, color: "text-emerald-600 bg-emerald-50 border-emerald-100" },
-                  { label: "Average Class Confidence", value: `${avgConf}%`, desc: "Average prediction probability", icon: TrendingUp, color: "text-violet-600 bg-violet-50 border-violet-100" },
-                  { label: "Active Classification Classes", value: "10", desc: "EuroSAT land cover categories", icon: Map, color: "text-amber-600 bg-amber-50 border-amber-100" }
+                  { label: "Total Classified Images", value: totalAnalyzed, desc: "Logged prediction records", icon: Layers, color: "text-blue-600 bg-blue-50 border-blue-100" },
+                  { label: "Production Benchmark Accuracy", value: prodAccuracy, desc: "EuroSAT test split performance", icon: Cpu, color: "text-emerald-600 bg-emerald-50 border-emerald-100" },
+                  { label: "External Validation Accuracy", value: extAccuracy, desc: "Out-of-distribution test set", icon: Map, color: "text-purple-600 bg-purple-50 border-purple-100" },
+                  { label: "Average Class Confidence", value: `${avgConf}%`, desc: "Inference probability mean", icon: TrendingUp, color: "text-amber-600 bg-amber-50 border-amber-100" }
                 ].map((kpi, idx) => (
                   <div key={idx} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between hover:shadow-md transition-shadow">
                     <div className="space-y-1">
                       <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{kpi.label}</p>
-                      <h3 className="text-3xl font-extrabold text-slate-900 tracking-tight font-display">{kpi.value}</h3>
-                      <p className="text-xs text-slate-400">{kpi.desc}</p>
+                      <h3 className="text-2xl font-extrabold text-slate-900 tracking-tight font-display">{kpi.value}</h3>
+                      <p className="text-[11px] text-slate-400">{kpi.desc}</p>
                     </div>
-                    <div className={`p-4 rounded-xl border ${kpi.color}`}>
+                    <div className={`p-3.5 rounded-xl border ${kpi.color}`}>
                       <kpi.icon className="w-6 h-6" />
                     </div>
                   </div>
@@ -552,76 +577,59 @@ function App() {
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm lg:col-span-2 space-y-6">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-4">
                     <div>
-                      <h3 className="text-lg font-bold text-slate-800 font-display">Transfer Learning Controller</h3>
-                      <p className="text-xs text-slate-500">Train ResNet50V2 on EuroSAT dataset</p>
+                      <h3 className="text-lg font-bold text-slate-800 font-display">Model Training Controller</h3>
+                      <p className="text-xs text-slate-500">Train or fine-tune ResNet50V2 on EuroSAT with Data Augmentation</p>
                     </div>
                     <Cpu className="w-6 h-6 text-blue-500" />
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    
+                    {/* Trial Demo Mode */}
                     <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3 flex flex-col justify-between">
                       <div>
-                        <span className="px-2 py-0.5 bg-blue-100 text-blue-800 text-[10px] font-bold rounded uppercase">Recommended</span>
+                        <span className="px-2 py-0.5 bg-blue-100 text-blue-800 text-[10px] font-bold rounded uppercase">Trial Trial Mode</span>
                         <h4 className="text-sm font-bold text-slate-800 mt-1">Quick Demo Training</h4>
                         <p className="text-xs text-slate-500 leading-relaxed mt-1">
-                          Subsamples 15 images/class, trains for 2 epochs on CPU. Completes in 10-15 seconds. Ideal for live presentations.
+                          Trains a demo trial model on small subset. Saves to <code className="text-[10px] bg-slate-200 px-1 rounded">demo_model.keras</code> without overwriting production model.
                         </p>
                       </div>
                       <button
-                        onClick={() => handleTrain(true)}
+                        onClick={() => handleTrain('demo')}
                         disabled={training}
-                        className="w-full mt-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg text-xs transition-colors flex items-center justify-center gap-2 shadow-sm shadow-blue-500/10 disabled:opacity-50"
+                        className="w-full mt-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg text-xs transition-colors flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
                       >
                         <RefreshCw className={`w-3.5 h-3.5 ${training ? 'animate-spin' : ''}`} />
-                        Run Demo Training
+                        Run Demo Trial Training
                       </button>
                     </div>
 
+                    {/* Production Model Training */}
                     <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3 flex flex-col justify-between">
                       <div>
-                        <span className="px-2 py-0.5 bg-slate-200 text-slate-700 text-[10px] font-bold rounded uppercase">Standard</span>
-                        <h4 className="text-sm font-bold text-slate-700 mt-1">Full CPU Training</h4>
+                        <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[10px] font-bold rounded uppercase">Production Update</span>
+                        <h4 className="text-sm font-bold text-slate-800 mt-1">Train Production Model</h4>
                         <p className="text-xs text-slate-500 leading-relaxed mt-1">
-                          Loads 200 images/class, trains for 10 epochs. Takes approximately 5-10 minutes on average systems.
+                          Runs 2-stage transfer learning fine-tuning on full EuroSAT splits. Updates production weights file <code className="text-[10px] bg-slate-200 px-1 rounded">resnet50v2_eurosat.keras</code>.
                         </p>
                       </div>
                       <button
-                        onClick={() => handleTrain(false)}
+                        onClick={() => handleTrain('production')}
                         disabled={training}
-                        className="w-full mt-4 bg-slate-800 hover:bg-slate-900 text-white font-semibold py-2.5 rounded-lg text-xs transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                        className="w-full mt-4 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold py-2.5 rounded-lg text-xs transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
                       >
                         <Cpu className="w-3.5 h-3.5" />
-                        Run Full Training
+                        Train Production Model
                       </button>
                     </div>
+
                   </div>
-                  <button
-                    onClick={() => {
-                      // Call reset model endpoint
-                      fetch(`${API_BASE}/reset_model`, { method: "POST" })
-                        .then(res => res.json())
-                        .then(data => {
-                          if (data.status === "success") {
-                            showNotification(`Model reset and retrained. ${data.message}`, "success");
-                            fetchAnalytics();
-                          } else {
-                            showNotification(`Reset failed: ${data.message}`, "error");
-                          }
-                        })
-                        .catch(err => showNotification("Error resetting model", "error"));
-                    }}
-                    disabled={training}
-                    className="w-full mt-4 bg-red-600 hover:bg-red-700 text-white font-semibold py-2.5 rounded-lg text-xs transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-                  >
-                    <RefreshCw className={"w-3.5 h-3.5"} />
-                    Reset Model
-                  </button>
                 </div>
 
                 {/* EuroSAT Classes Checklist Card */}
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-                  <h3 className="text-lg font-bold text-slate-800 font-display">Target Classification Classes</h3>
-                  <div className="max-height-[320px] overflow-y-auto space-y-2 pr-1">
+                  <h3 className="text-lg font-bold text-slate-800 font-display">Supported Categories</h3>
+                  <div className="max-h-[320px] overflow-y-auto space-y-2 pr-1">
                     {CLASSES.map((cls) => (
                       <div key={cls} className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs">
                         <div className="flex items-center gap-2">
@@ -642,7 +650,7 @@ function App() {
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <h3 className="text-lg font-bold text-slate-800 font-display">Recent Activity Log</h3>
+                    <h3 className="text-lg font-bold text-slate-800 font-display">Recent Classification Activity</h3>
                     <p className="text-xs text-slate-500">Most recent predictions generated by the system</p>
                   </div>
                   <button 
@@ -659,8 +667,8 @@ function App() {
                     <thead>
                       <tr className="border-b border-slate-200 text-slate-400 font-semibold bg-slate-50/50">
                         <th className="py-3 px-4">Preview</th>
-                        <th className="py-3 px-4">Image Filename</th>
-                        <th className="py-3 px-4">Class Target</th>
+                        <th className="py-3 px-4">Filename</th>
+                        <th className="py-3 px-4">Classification</th>
                         <th className="py-3 px-4">Confidence</th>
                         <th className="py-3 px-4">Timestamp</th>
                       </tr>
@@ -710,7 +718,7 @@ function App() {
                 <div className="space-y-6">
                   <div>
                     <h3 className="text-lg font-bold text-slate-800 font-display">Satellite Image Upload</h3>
-                    <p className="text-xs text-slate-500">Upload a single 64x64 or high-resolution RGB satellite image</p>
+                    <p className="text-xs text-slate-500">Upload a single 64x64 EuroSAT patch or a high-resolution outside image</p>
                   </div>
 
                   <div className="border-2 border-dashed border-slate-300 hover:border-blue-500 bg-slate-50 rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-colors relative group min-h-[300px]">
@@ -724,7 +732,6 @@ function App() {
                     
                     {singlePreview ? (
                       <div className="w-full flex flex-col items-center justify-center relative">
-                        {/* Remove Image Option */}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -759,7 +766,7 @@ function App() {
                         </div>
                         <div>
                           <p className="text-sm font-bold text-slate-700">Drag & drop your satellite image here</p>
-                          <p className="text-xs text-slate-400 mt-1">Supports PNG, JPG, or JPEG formats</p>
+                          <p className="text-xs text-slate-400 mt-1">Supports PNG, JPG, or TIFF formats</p>
                         </div>
                         <button className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2 rounded-lg text-xs transition-colors pointer-events-none">
                           Browse Local Files
@@ -771,12 +778,12 @@ function App() {
                   <button
                     onClick={triggerSinglePredict}
                     disabled={!singleImage || analyzingSingle}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl transition-all shadow-md shadow-blue-600/10 flex items-center justify-center gap-2 disabled:opacity-50 text-sm"
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-50 text-sm"
                   >
                     {analyzingSingle ? (
                       <>
                         <RefreshCw className="w-4 h-4 animate-spin" />
-                        Analyzing Geographical Features...
+                        Running Multi-Crop TTA Inference...
                       </>
                     ) : (
                       <>
@@ -791,10 +798,11 @@ function App() {
                 <div className="border border-slate-200 rounded-2xl bg-slate-50/50 p-6 flex flex-col justify-between min-h-[400px]">
                   {singleResult ? (
                     <div className="space-y-6 flex-1 flex flex-col justify-between">
-                      {/* Classification Title & Confidence */}
+                      
+                      {/* Classification Title & Calibrated Confidence */}
                       <div className="flex justify-between items-start">
                         <div className="space-y-1">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Primary Prediction</span>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Predicted Land Cover</span>
                           <h4 className="text-3xl font-extrabold text-slate-900 font-display flex items-center gap-2">
                             {singleResult.prediction}
                             <span 
@@ -807,17 +815,25 @@ function App() {
                           </p>
                         </div>
                         
-                        <div className="text-right">
+                        <div className="text-right space-y-1">
                           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Confidence</span>
                           <h4 className="text-3xl font-extrabold text-blue-600 font-mono tracking-tight">
                             {singleResult.confidence.toFixed(1)}%
                           </h4>
+                          
+                          {/* Low Confidence Warning Badge */}
+                          {singleResult.is_low_confidence && (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200">
+                              <AlertTriangle className="w-3 h-3 text-amber-600" />
+                              Uncertain / Low Confidence
+                            </span>
+                          )}
                         </div>
                       </div>
 
-                      {/* Grad-CAM side-by-side or highlight */}
+                      {/* Grad-CAM Visualizer */}
                       <div className="space-y-2">
-                        <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Explainability Visualization (Grad-CAM)</h5>
+                        <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Explainability Saliency (Grad-CAM)</h5>
                         <div className="grid grid-cols-2 gap-4">
                           <div className="space-y-1">
                             <div className="border border-slate-200 rounded-lg bg-white p-2">
@@ -827,24 +843,30 @@ function App() {
                                 className="w-full aspect-square object-cover rounded-md"
                               />
                             </div>
-                            <p className="text-[10px] text-center font-bold text-slate-500">Original RGB Input</p>
+                            <p className="text-[10px] text-center font-bold text-slate-500">Input RGB Image</p>
                           </div>
                           <div className="space-y-1">
                             <div className="border border-slate-200 rounded-lg bg-white p-2">
-                              <img 
-                                src={`${API_BASE}${singleResult.heatmap_url}`} 
-                                alt="Heatmap" 
-                                className="w-full aspect-square object-cover rounded-md"
-                              />
+                              {singleResult.heatmap_url ? (
+                                <img 
+                                  src={`${API_BASE}${singleResult.heatmap_url}`} 
+                                  alt="Heatmap" 
+                                  className="w-full aspect-square object-cover rounded-md"
+                                />
+                              ) : (
+                                <div className="w-full aspect-square bg-slate-100 flex items-center justify-center text-xs text-slate-400 p-2 text-center">
+                                  Grad-CAM unavailable for this input format
+                                </div>
+                              )}
                             </div>
                             <p className="text-[10px] text-center font-bold text-slate-500 text-blue-600">Model Attention Heatmap</p>
                           </div>
                         </div>
                       </div>
 
-                      {/* Top 3 Predictions Bar Graph */}
+                      {/* Top Predictions */}
                       <div className="space-y-3 bg-white p-4 rounded-xl border border-slate-200">
-                        <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Top Predictions Probability</h5>
+                        <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Top Class Candidates</h5>
                         <div className="space-y-2">
                           {singleResult.top_predictions.slice(0, 3).map((item, idx) => (
                             <div key={idx} className="space-y-1">
@@ -867,13 +889,15 @@ function App() {
                       </div>
 
                       {/* Download PDF Action */}
-                      <a
-                        href={`${API_BASE}/download_report/${singleResult.id}`}
-                        className="w-full mt-4 bg-slate-800 hover:bg-slate-900 text-white font-bold py-3.5 rounded-xl text-xs transition-colors flex items-center justify-center gap-2"
-                      >
-                        <FileText className="w-4 h-4" />
-                        Download Detailed PDF Report
-                      </a>
+                      {singleResult.id && (
+                        <a
+                          href={`${API_BASE}/download_report/${singleResult.id}`}
+                          className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3.5 rounded-xl text-xs transition-colors flex items-center justify-center gap-2"
+                        >
+                          <FileText className="w-4 h-4" />
+                          Download PDF Summary Report
+                        </a>
+                      )}
                     </div>
                   ) : (
                     <div className="flex-1 flex flex-col items-center justify-center text-center p-8 space-y-4">
@@ -881,9 +905,9 @@ function App() {
                         <HelpCircle className="w-8 h-8" />
                       </div>
                       <div>
-                        <h4 className="text-sm font-bold text-slate-700">Analysis Awaiting Trigger</h4>
+                        <h4 className="text-sm font-bold text-slate-700 font-display">Awaiting Classification Input</h4>
                         <p className="text-xs text-slate-400 mt-1 max-w-[280px] mx-auto">
-                          Upload an image and click the classify button to analyze geographical structures and generate a Grad-CAM heatmap.
+                          Upload an image and run classification to view land cover predictions, confidence scores, and Grad-CAM saliency maps.
                         </p>
                       </div>
                     </div>
@@ -899,8 +923,8 @@ function App() {
             <div className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm space-y-8 animate-fade-in">
               <div className="flex items-center justify-between border-b border-slate-100 pb-4">
                 <div>
-                  <h3 className="text-lg font-bold text-slate-800 font-display">Batch Satellite Prediction</h3>
-                  <p className="text-xs text-slate-500">Upload and process multiple images concurrently to categorize entire sets of files</p>
+                  <h3 className="text-lg font-bold text-slate-800 font-display">Batch Image Processing</h3>
+                  <p className="text-xs text-slate-500">Upload multiple satellite images concurrently to classify entire file sets</p>
                 </div>
                 <div className="flex gap-2">
                   {batchResults.length > 0 && (
@@ -934,9 +958,9 @@ function App() {
                     <Upload className="w-6 h-6 mx-auto" />
                   </div>
                   <div>
-                    <p className="text-sm font-bold text-slate-700">Select Multiple Images</p>
+                    <p className="text-sm font-bold text-slate-700">Select Multiple Satellite Images</p>
                     <p className="text-xs text-slate-400 mt-1">
-                      {batchFiles.length > 0 ? `${batchFiles.length} files selected` : "Supports batch upload of JPG/PNG files"}
+                      {batchFiles.length > 0 ? `${batchFiles.length} files selected` : "Supports batch upload of JPG/PNG/TIFF files"}
                     </p>
                   </div>
                   {batchFiles.length > 0 && (
@@ -970,11 +994,12 @@ function App() {
                   ) : (
                     <>
                       <Layers className="w-4 h-4" />
-                      Analyze Selected Files
+                      Analyze Selected Batch Files
                     </>
                   )}
                 </button>
               )}
+
               {batchResults.length > 0 && (
                 <div className="border border-slate-200 rounded-xl overflow-hidden mt-6 shadow-sm">
                   <table className="w-full text-left text-xs border-collapse">
@@ -982,9 +1007,10 @@ function App() {
                       <tr className="border-b border-slate-200 text-slate-400 font-semibold bg-slate-50">
                         <th className="py-3 px-4">Thumbnail</th>
                         <th className="py-3 px-4">Filename</th>
-                        <th className="py-3 px-4">Prediction</th>
+                        <th className="py-3 px-4">Classification</th>
                         <th className="py-3 px-4">Confidence</th>
-                        <th className="py-3 px-4 text-center">Actions</th>
+                        <th className="py-3 px-4">Uncertainty Flag</th>
+                        <th className="py-3 px-4 text-center">Report</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -992,39 +1018,48 @@ function App() {
                         <tr key={index} className="hover:bg-slate-50/50 transition-colors">
                           <td className="py-3 px-4">
                             {r.image_url ? (
-                               <img 
-                                 src={`${API_BASE}${r.image_url}`} 
-                                 alt={r.prediction}
-                                 className="w-10 h-10 object-cover rounded-md border border-slate-200"
-                               />
+                              <img 
+                                src={`${API_BASE}${r.image_url}`} 
+                                alt={r.prediction}
+                                className="w-10 h-10 object-cover rounded-md border border-slate-200"
+                              />
                             ) : (
-                               <div className="w-10 h-10 bg-slate-100 rounded-md border border-slate-200 flex items-center justify-center text-[8px] font-bold text-red-500">
-                                 Fail
-                               </div>
+                              <div className="w-10 h-10 bg-slate-100 rounded-md border border-slate-200 flex items-center justify-center text-[8px] font-bold text-red-500">
+                                Fail
+                              </div>
                             )}
                           </td>
                           <td className="py-3 px-4 font-semibold text-slate-700">{r.image_name}</td>
                           <td className="py-3 px-4">
                             {r.status === "error" ? (
-                               <span className="text-red-500 font-bold">Failed</span>
+                              <span className="text-red-500 font-bold">Failed</span>
                             ) : (
-                               <span className="px-2.5 py-1 rounded-full text-[10px] font-bold" style={{ backgroundColor: `${CLASS_COLORS[r.prediction]}20`, color: CLASS_COLORS[r.prediction] }}>
-                                 {r.prediction}
-                               </span>
+                              <span className="px-2.5 py-1 rounded-full text-[10px] font-bold" style={{ backgroundColor: `${CLASS_COLORS[r.prediction]}20`, color: CLASS_COLORS[r.prediction] }}>
+                                {r.prediction}
+                              </span>
                             )}
                           </td>
                           <td className="py-3 px-4 font-mono font-semibold text-blue-600">
                             {r.status === "error" ? "-" : `${r.confidence.toFixed(1)}%`}
                           </td>
+                          <td className="py-3 px-4">
+                            {r.is_low_confidence ? (
+                              <span className="px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-800 rounded border border-amber-200 flex items-center gap-1 w-max">
+                                <AlertTriangle className="w-3 h-3 text-amber-600" /> Uncertain
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-slate-400 font-medium">Normal</span>
+                            )}
+                          </td>
                           <td className="py-3 px-4 text-center">
                             {r.id && (
-                               <a
-                                 href={`${API_BASE}/download_report/${r.id}`}
-                                 className="text-slate-500 hover:text-blue-600 inline-flex items-center gap-1 font-semibold"
-                               >
-                                 <Download className="w-3.5 h-3.5" />
-                                 PDF
-                               </a>
+                              <a
+                                href={`${API_BASE}/download_report/${r.id}`}
+                                className="text-slate-500 hover:text-blue-600 inline-flex items-center gap-1 font-semibold"
+                              >
+                                <Download className="w-3.5 h-3.5" />
+                                PDF
+                              </a>
                             )}
                           </td>
                         </tr>
@@ -1041,8 +1076,8 @@ function App() {
           {activeTab === 'grid' && (
             <div className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm space-y-8 animate-fade-in">
               <div className="border-b border-slate-100 pb-4">
-                <h3 className="text-lg font-bold text-slate-800 font-display">Large Image Grid Slicing Classifier</h3>
-                <p className="text-xs text-slate-500">Upload a high-resolution satellite composite. The model will partition the image into 64x64 blocks to classify and map the entire region.</p>
+                <h3 className="text-lg font-bold text-slate-800 font-display">Overlapping Multi-Scale Grid Classifier</h3>
+                <p className="text-xs text-slate-500">Upload a large satellite composite. The system partitions the image into overlapping multi-scale windows and aggregates spatial probabilities.</p>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -1052,7 +1087,7 @@ function App() {
                     <input 
                       type="file" 
                       accept="image/*"
-                      ref={singleInputRef} // reuse singleInputRef for convenience or keep it simple
+                      ref={singleInputRef}
                       onChange={handleGridUpload}
                       className="absolute inset-0 opacity-0 cursor-pointer"
                     />
@@ -1072,7 +1107,6 @@ function App() {
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                         
-                        {/* Image Container with Absolute Grid Overlay */}
                         <div className="relative inline-block border border-slate-200 rounded-xl overflow-hidden shadow-md max-w-[500px]">
                           <img 
                             src={gridPreview} 
@@ -1094,26 +1128,27 @@ function App() {
                                   key={idx}
                                   onMouseEnter={() => setHoveredGridCell(cell)}
                                   onMouseLeave={() => setHoveredGridCell(null)}
-                                  className="border border-white/10 transition-all duration-100 cursor-crosshair"
+                                  className={`border transition-all duration-100 cursor-crosshair ${
+                                    cell.is_low_confidence ? 'border-amber-400 border-dashed' : 'border-white/10'
+                                  }`}
                                   style={{
                                     backgroundColor: hoveredGridCell === cell 
                                       ? `${CLASS_COLORS[cell.prediction]}60` 
-                                      : `${CLASS_COLORS[cell.prediction]}15`
+                                      : `${CLASS_COLORS[cell.prediction]}30`
                                   }}
-                                />
+                                ></div>
                               ))}
                             </div>
                           )}
                         </div>
+                        <p className="text-xs text-slate-500 mt-2 font-mono">{gridImage?.name}</p>
                       </div>
                     ) : (
                       <div className="space-y-3">
-                        <div className="p-3 bg-blue-50 border border-blue-100 rounded-full text-blue-600 inline-block">
-                          <Upload className="w-6 h-6 mx-auto" />
-                        </div>
+                        <Upload className="w-8 h-8 text-blue-500 mx-auto" />
                         <div>
-                          <p className="text-sm font-bold text-slate-700">Upload Large Satellite Composite</p>
-                          <p className="text-xs text-slate-400 mt-1">Recommended size: 256x256, 512x512, or 1024x1024 pixels</p>
+                          <p className="text-sm font-bold text-slate-700">Upload Regional Satellite Image</p>
+                          <p className="text-xs text-slate-400">Supports large composite satellite imagery</p>
                         </div>
                       </div>
                     )}
@@ -1123,100 +1158,78 @@ function App() {
                     <button
                       onClick={triggerGridPredict}
                       disabled={analyzingGrid}
-                      className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 text-xs shadow-md shadow-blue-500/10"
+                      className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 text-xs disabled:opacity-50"
                     >
                       {analyzingGrid ? (
                         <>
                           <RefreshCw className="w-4 h-4 animate-spin" />
-                          Partitioning and Classifying Terrain...
+                          Slicing & Aggregating Overlapping Spatial Probabilities...
                         </>
                       ) : (
                         <>
                           <Layers className="w-4 h-4" />
-                          Classify Composite Area
+                          Run Overlapping Grid Classification
                         </>
                       )}
                     </button>
                   )}
                 </div>
 
-                {/* Slicing Analytics Summary */}
-                <div className="border border-slate-200 rounded-2xl bg-slate-50/50 p-6 flex flex-col justify-between min-h-[300px]">
-                  {gridResult ? (
-                    <div className="space-y-6 flex-1 flex flex-col justify-between">
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-800 uppercase tracking-wider text-slate-400">Composite Grid Map</h4>
-                        <div className="grid grid-cols-2 gap-4 mt-2">
-                          <div className="bg-white p-3 rounded-xl border border-slate-200">
-                            <span className="text-[10px] text-slate-400 font-bold uppercase">Grid Layout</span>
-                            <p className="text-lg font-black text-slate-700">{gridResult.grid_size.rows} x {gridResult.grid_size.cols} cells</p>
-                          </div>
-                          <div className="bg-white p-3 rounded-xl border border-slate-200">
-                            <span className="text-[10px] text-slate-400 font-bold uppercase">Total Tiles</span>
-                            <p className="text-lg font-black text-slate-700">{gridResult.predictions.length} patches</p>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Hover Cell Inspector */}
-                      <div className="bg-white p-4 rounded-xl border border-slate-200 min-h-[100px] flex flex-col justify-center">
-                        {hoveredGridCell ? (
-                          <div className="space-y-2">
-                            <div className="flex justify-between items-center">
-                              <span className="text-[10px] text-slate-400 font-bold uppercase">Cell [{hoveredGridCell.position.row}, {hoveredGridCell.position.col}]</span>
-                              <span 
-                                className="w-2.5 h-2.5 rounded-full"
-                                style={{ backgroundColor: CLASS_COLORS[hoveredGridCell.prediction] }}
-                              ></span>
-                            </div>
-                            <h4 className="text-xl font-bold text-slate-800">{hoveredGridCell.prediction}</h4>
-                            <p className="text-xs text-blue-600 font-semibold font-mono">Confidence: {hoveredGridCell.confidence.toFixed(1)}%</p>
-                          </div>
-                        ) : (
-                          <p className="text-xs text-slate-400 text-center italic">Hover over the classified image grid to inspect individual cells</p>
+                {/* Grid Cell Inspector Side Panel */}
+                <div className="border border-slate-200 rounded-2xl bg-slate-50/50 p-6 flex flex-col justify-between">
+                  {hoveredGridCell ? (
+                    <div className="space-y-4">
+                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Cell Inspector</h4>
+                      <div className="space-y-1">
+                        <h5 className="text-2xl font-extrabold text-slate-900 font-display flex items-center gap-2">
+                          {hoveredGridCell.prediction}
+                          <span 
+                            className="w-3.5 h-3.5 rounded-full"
+                            style={{ backgroundColor: CLASS_COLORS[hoveredGridCell.prediction] }}
+                          ></span>
+                        </h5>
+                        <p className="text-xs text-blue-600 font-mono font-bold">
+                          Confidence: {hoveredGridCell.confidence.toFixed(1)}%
+                        </p>
+                        {hoveredGridCell.is_low_confidence && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 bg-amber-100 text-amber-800 rounded border border-amber-200">
+                            <AlertTriangle className="w-3 h-3 text-amber-600" /> Uncertain Prediction
+                          </span>
                         )}
                       </div>
-
-                      {/* Coverage Breakdown */}
-                      <div className="space-y-3">
-                        <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Areal Coverage breakdown</h5>
-                        <div className="max-h-[160px] overflow-y-auto space-y-2 pr-1">
-                          {Object.entries(
-                            gridResult.predictions.reduce((acc, cell) => {
-                              acc[cell.prediction] = (acc[cell.prediction] || 0) + 1;
-                              return acc;
-                            }, {})
-                          ).map(([cls, count]) => {
-                            const pct = ((count / gridResult.predictions.length) * 100).toFixed(1);
-                            return (
-                              <div key={cls} className="space-y-1">
-                                <div className="flex justify-between text-xs font-semibold">
-                                  <span className="text-slate-700">{cls}</span>
-                                  <span className="text-slate-500">{pct}%</span>
-                                </div>
-                                <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                                  <div 
-                                    className="h-full rounded-full"
-                                    style={{ width: `${pct}%`, backgroundColor: CLASS_COLORS[cls] }}
-                                  ></div>
-                                </div>
-                              </div>
-                            );
-                          })}
+                      
+                      {hoveredGridCell.top_predictions && (
+                        <div className="space-y-2 pt-2 border-t border-slate-200">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase">Cell Candidates</p>
+                          {hoveredGridCell.top_predictions.map((cp, idx) => (
+                            <div key={idx} className="flex justify-between text-xs font-semibold">
+                              <span>{cp.class}</span>
+                              <span className="font-mono text-slate-500">{cp.confidence.toFixed(1)}%</span>
+                            </div>
+                          ))}
                         </div>
+                      )}
+                    </div>
+                  ) : gridResult ? (
+                    <div className="space-y-4">
+                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Grid Mapping Summary</h4>
+                      <div className="space-y-2">
+                        <p className="text-xs text-slate-600 font-medium">
+                          Dimensions: {gridResult.image_size?.width} &times; {gridResult.image_size?.height} px
+                        </p>
+                        <p className="text-xs text-slate-600 font-medium">
+                          Total Cells: {gridResult.predictions.length} patches ({gridResult.grid_size?.rows} rows &times; {gridResult.grid_size?.cols} cols)
+                        </p>
+                        <p className="text-xs text-slate-500 pt-2 border-t border-slate-200">
+                          Hover over any cell on the image grid to inspect exact class predictions and confidence values.
+                        </p>
                       </div>
                     </div>
                   ) : (
-                    <div className="flex-1 flex flex-col items-center justify-center text-center p-8 space-y-4">
-                      <div className="w-16 h-16 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-400">
-                        <HelpCircle className="w-8 h-8" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-700">Grid Classifier Awaiting</h4>
-                        <p className="text-xs text-slate-400 mt-1 max-w-[280px] mx-auto">
-                          Upload a large composite image (e.g. mapping an entire farming tract) and run class analysis to plot grid layers.
-                        </p>
-                      </div>
+                    <div className="flex-1 flex flex-col items-center justify-center text-center p-6 space-y-3">
+                      <HelpCircle className="w-8 h-8 text-slate-400 mx-auto" />
+                      <h4 className="text-xs font-bold text-slate-700">Grid Classifier Ready</h4>
+                      <p className="text-[11px] text-slate-400">Upload an image and run grid classification to map regional land cover.</p>
                     </div>
                   )}
                 </div>
@@ -1224,20 +1237,17 @@ function App() {
             </div>
           )}
 
-
-
           {/* TAB 4: CHANGE DETECTION */}
           {activeTab === 'change' && (
             <div className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm space-y-8 animate-fade-in">
               <div className="border-b border-slate-100 pb-4">
                 <h3 className="text-lg font-bold text-slate-800 font-display">Historical GIS Change Detection</h3>
-                <p className="text-xs text-slate-500">Upload two images of the same location from different points in time to analyze transitions</p>
+                <p className="text-xs text-slate-500">Upload two satellite images of the same location from different time periods</p>
               </div>
 
-              {/* Comparison Image Pickers */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 
-                {/* Previous (Old) Image */}
+                {/* Previous Image */}
                 <div className="space-y-3">
                   <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-slate-400"></span>
@@ -1269,8 +1279,7 @@ function App() {
                             setChangeResult(null);
                             if (oldInputRef.current) oldInputRef.current.value = "";
                           }}
-                          className="absolute -top-3 -right-3 p-1 bg-red-100 hover:bg-red-200 border border-red-200 text-red-600 rounded-full shadow z-20 transition-all"
-                          title="Remove Image"
+                          className="absolute -top-3 -right-3 p-1 bg-red-100 hover:bg-red-200 text-red-600 rounded-full shadow z-20"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1285,7 +1294,7 @@ function App() {
                   </div>
                 </div>
 
-                {/* Current (New) Image */}
+                {/* Current Image */}
                 <div className="space-y-3">
                   <h4 className="text-sm font-bold text-slate-700 flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
@@ -1317,8 +1326,7 @@ function App() {
                             setChangeResult(null);
                             if (newInputRef.current) newInputRef.current.value = "";
                           }}
-                          className="absolute -top-3 -right-3 p-1 bg-red-100 hover:bg-red-200 border border-red-200 text-red-600 rounded-full shadow z-20 transition-all"
-                          title="Remove Image"
+                          className="absolute -top-3 -right-3 p-1 bg-red-100 hover:bg-red-200 text-red-600 rounded-full shadow z-20"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1344,7 +1352,7 @@ function App() {
                   {detectingChange ? (
                     <>
                       <RefreshCw className="w-4 h-4 animate-spin" />
-                      Evaluating Land Cover Changes...
+                      Evaluating Land Cover Transitions...
                     </>
                   ) : (
                     <>
@@ -1360,13 +1368,13 @@ function App() {
                 <div className="border border-slate-200 rounded-2xl bg-slate-50/50 p-6 space-y-6">
                   <div className="flex items-center justify-between border-b border-slate-200 pb-4">
                     <div>
-                      <h4 className="text-base font-bold text-slate-800">Socio-Environmental Impact Analysis</h4>
+                      <h4 className="text-base font-bold text-slate-800">Environmental Impact Analysis</h4>
                       <p className="text-xs text-slate-500">Transition evaluation based on EuroSAT taxonomy rules</p>
                     </div>
                     
                     <span className={`px-4 py-1.5 rounded-full text-xs font-bold border ${
                       changeResult.change_detected 
-                        ? 'bg-rose-50 text-rose-800 border-rose-200 animate-pulse' 
+                        ? 'bg-rose-50 text-rose-800 border-rose-200' 
                         : 'bg-emerald-50 text-emerald-800 border-emerald-200'
                     }`}>
                       {changeResult.change_detected ? "CHANGE DETECTED" : "STABLE LAND USE"}
@@ -1375,7 +1383,6 @@ function App() {
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
                     
-                    {/* Visual Comparison cards */}
                     <div className="grid grid-cols-2 gap-4 bg-white p-4 rounded-xl border border-slate-200">
                       <div className="space-y-1">
                         <div className="aspect-square relative rounded-lg border overflow-hidden">
@@ -1400,16 +1407,15 @@ function App() {
                       </div>
                     </div>
 
-                    {/* Change Assessment Details */}
                     <div className="space-y-4">
                       <div className="bg-white p-5 rounded-xl border border-slate-200 space-y-2">
                         <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Identified Impact</span>
                         <h4 className="text-2xl font-black text-slate-900 tracking-tight">{changeResult.impact}</h4>
                         <p className="text-xs text-slate-600 leading-relaxed pt-1">
                           {changeResult.change_detected ? (
-                            `The satellite analysis identified a clear shift in class signature from "${changeResult.old_class}" to "${changeResult.new_class}". This shift impacts agricultural, natural canopy, or hydrological parameters and requires GIS verification.`
+                            `Class transition identified from "${changeResult.old_class}" to "${changeResult.new_class}".`
                           ) : (
-                            "No significant class shifts were identified. The terrain indicates stable cover characteristics across both timelines."
+                            "No significant class shifts identified. The terrain indicates stable cover characteristics."
                           )}
                         </p>
                       </div>
@@ -1424,14 +1430,12 @@ function App() {
           {/* TAB 5: HISTORY LOGS */}
           {activeTab === 'history' && (
             <div className="bg-white p-8 rounded-2xl border border-slate-200 shadow-sm space-y-6 animate-fade-in">
-              
-              {/* Filtering Interface */}
               <div className="flex flex-col md:flex-row gap-4 items-center justify-between border-b border-slate-100 pb-4">
                 <div className="relative w-full md:w-80">
                   <Search className="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" />
                   <input
                     type="text"
-                    placeholder="Search image name or class..."
+                    placeholder="Search filename or class..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="w-full pl-10 pr-4 py-2.5 rounded-lg border border-slate-200 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -1453,15 +1457,14 @@ function App() {
                 </div>
               </div>
 
-              {/* Records List Table */}
               <div className="overflow-x-auto border border-slate-200 rounded-xl shadow-sm">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead>
                     <tr className="border-b border-slate-200 text-slate-400 font-semibold bg-slate-50">
-                      <th className="py-3 px-4">Original Image</th>
-                      <th className="py-3 px-4">Explainability</th>
+                      <th className="py-3 px-4">Image</th>
+                      <th className="py-3 px-4">Grad-CAM Saliency</th>
                       <th className="py-3 px-4">Filename</th>
-                      <th className="py-3 px-4">Predicted Category</th>
+                      <th className="py-3 px-4">Category</th>
                       <th className="py-3 px-4">Confidence</th>
                       <th className="py-3 px-4">Timestamp</th>
                       <th className="py-3 px-4 text-center">Actions</th>
@@ -1479,12 +1482,16 @@ function App() {
                           />
                         </td>
                         <td className="py-3 px-4">
-                          <img 
-                            src={`${API_BASE}${row.heatmap_url}`} 
-                            alt="Heatmap" 
-                            className="w-12 h-12 object-cover rounded-md border border-slate-200"
-                            onError={(e) => { e.target.src = 'https://placehold.co/100x100?text=Grad-CAM'; }}
-                          />
+                          {row.heatmap_url ? (
+                            <img 
+                              src={`${API_BASE}${row.heatmap_url}`} 
+                              alt="Heatmap" 
+                              className="w-12 h-12 object-cover rounded-md border border-slate-200"
+                              onError={(e) => { e.target.src = 'https://placehold.co/100x100?text=Grad-CAM'; }}
+                            />
+                          ) : (
+                            <span className="text-[10px] text-slate-400 font-mono">N/A</span>
+                          )}
                         </td>
                         <td className="py-3 px-4 font-semibold text-slate-700">{row.image_name}</td>
                         <td className="py-3 px-4">
@@ -1499,7 +1506,7 @@ function App() {
                             <a
                               href={`${API_BASE}/download_report/${row.id}`}
                               className="text-slate-500 hover:text-blue-600 inline-flex items-center gap-1 font-bold"
-                              title="Download Report"
+                              title="Download PDF Report"
                             >
                               <FileText className="w-4 h-4" />
                             </a>
@@ -1527,16 +1534,34 @@ function App() {
             </div>
           )}
 
-          {/* TAB 6: ANALYTICS PANEL */}
+          {/* TAB 6: ANALYTICS & VALIDATION PANEL */}
           {activeTab === 'analytics' && (
             <div className="space-y-8 animate-fade-in">
               
+              {/* External Validation Controller Banner */}
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-base font-bold text-slate-800 font-display">Out-of-Distribution External Dataset Evaluator</h3>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Evaluates the model separately on images stored in <code className="bg-slate-100 px-1 rounded">external_validation/</code> class folders (outside EuroSAT).
+                  </p>
+                </div>
+                <button
+                  onClick={triggerEvalExternal}
+                  disabled={evaluatingExt}
+                  className="bg-purple-700 hover:bg-purple-800 text-white font-bold px-5 py-2.5 rounded-xl text-xs transition-colors flex items-center gap-2 disabled:opacity-50 whitespace-nowrap"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${evaluatingExt ? 'animate-spin' : ''}`} />
+                  Run External Dataset Evaluation
+                </button>
+              </div>
+
               {/* Distribution Charts */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                 
                 {/* Class Distribution Pie Chart */}
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-                  <h3 className="text-base font-bold text-slate-800 font-display">Class Coverage Distribution</h3>
+                  <h3 className="text-base font-bold text-slate-800 font-display">Logged Class Coverage Distribution</h3>
                   <div className="aspect-square max-h-[340px] mx-auto flex items-center justify-center">
                     {analytics && Object.keys(analytics.class_distribution || {}).length > 0 ? (
                       <Pie 
@@ -1556,7 +1581,7 @@ function App() {
                   </div>
                 </div>
 
-                {/* Prediction Trends Line Chart */}
+                {/* Activity Trends */}
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
                   <h3 className="text-base font-bold text-slate-800 font-display">Classification Activity Trends</h3>
                   <div className="aspect-video flex items-center justify-center">
@@ -1577,9 +1602,9 @@ function App() {
 
               </div>
 
-              {/* Model Training Epoch Accuracies */}
+              {/* Epoch History Bar Chart */}
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
-                <h3 className="text-base font-bold text-slate-800 font-display">Model Training History (Accuracy per Epoch)</h3>
+                <h3 className="text-base font-bold text-slate-800 font-display">Production Training Accuracy Curve</h3>
                 <div className="aspect-[3/1] max-h-[280px] flex items-center justify-center">
                   {analytics && analytics.model_metrics?.history ? (
                     <Bar 
@@ -1590,7 +1615,7 @@ function App() {
                       }}
                     />
                   ) : (
-                    <p className="text-xs text-slate-400 font-semibold">No model metrics. Run a training cycle to render history.</p>
+                    <p className="text-xs text-slate-400 font-semibold">No model history metrics. Run production training to render history.</p>
                   )}
                 </div>
               </div>

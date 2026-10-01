@@ -8,14 +8,20 @@ import cv2
 import json
 from sklearn.metrics import precision_recall_fscore_support, confusion_matrix, accuracy_score
 
+# Set reproducible random seeds
+keras.utils.set_random_seed(42)
+
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATASET_DIR = os.path.join(BASE_DIR, "..", "..", "EuroSAT")
 MODEL_DIR = os.path.join(BASE_DIR, "model")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-MODEL_PATH = os.path.join(MODEL_DIR, "resnet50v2_eurosat.keras")
-METRICS_PATH = os.path.join(MODEL_DIR, "metrics.json")
+PROD_MODEL_PATH = os.path.join(MODEL_DIR, "resnet50v2_eurosat.keras")
+PROD_METRICS_PATH = os.path.join(MODEL_DIR, "metrics.json")
+
+DEMO_MODEL_PATH = os.path.join(MODEL_DIR, "demo_model.keras")
+DEMO_METRICS_PATH = os.path.join(MODEL_DIR, "demo_metrics.json")
 
 # Class names and labels
 CLASSES = [
@@ -28,28 +34,22 @@ def load_image(img_relative_path, target_size=(64, 64)):
     img_path = os.path.join(DATASET_DIR, img_relative_path.replace('/', os.sep))
     if not os.path.exists(img_path):
         return None
-    # Read image
     img = cv2.imread(img_path)
     if img is None:
         return None
-    # Convert BGR to RGB
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    # Resize
     img = cv2.resize(img, target_size)
-    # Normalize
     img = img.astype("float32") / 255.0
     return img
 
 def load_data_from_csv(csv_filename, sample_size=None):
     csv_path = os.path.join(DATASET_DIR, csv_filename)
     if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV file not found at {csv_path}")
+        raise FileNotFoundError(f"CSV dataset mapping not found at {csv_path}")
         
     df = pd.read_csv(csv_path)
     
-    # If sampling is enabled (e.g. for quick demo training)
     if sample_size is not None:
-        # Sample evenly across classes if possible
         df = df.groupby("ClassName").apply(lambda x: x.sample(min(len(x), sample_size), random_state=42)).reset_index(drop=True)
     
     images = []
@@ -61,166 +61,198 @@ def load_data_from_csv(csv_filename, sample_size=None):
             images.append(img)
             labels.append(row['Label'])
             
-    return np.array(images), np.array(labels)
+    return np.array(images, dtype="float32"), np.array(labels, dtype="int64")
 
-def get_model(input_shape=(64, 64, 3), num_classes=10, fine_tune=False):
-    # Custom head input
+def build_model(input_shape=(64, 64, 3), num_classes=10, unfreeze_layers=0):
     inputs = keras.Input(shape=input_shape)
-    # Rescaling layer to convert input image from [0, 1] range to [-1, 1] expected by ResNet50V2
-    x = keras.layers.Rescaling(scale=2.0, offset=-1.0)(inputs)
     
-    # Base ResNet50V2 model
+    # Satellite Data Augmentation Pipeline
+    # Using spatial rotations (0, 90, 180, 270 deg), flips, subtle contrast/zoom
+    augmented = keras.Sequential([
+        keras.layers.RandomFlip("horizontal_and_vertical"),
+        keras.layers.RandomRotation(0.25), # 90 degree random rotations
+        keras.layers.RandomZoom(0.1),
+        keras.layers.RandomContrast(0.1),
+    ], name="satellite_augmentation")(inputs)
+    
+    # Rescaling input [0, 1] -> [-1, 1] as required by ResNet50V2
+    x = keras.layers.Rescaling(scale=2.0, offset=-1.0)(augmented)
+    
+    # Base ResNet50V2 model with ImageNet pre-trained weights
     base_model = keras.applications.ResNet50V2(
         input_shape=input_shape,
         include_top=False,
         weights="imagenet"
     )
-    if fine_tune:
-        # Enable fine-tuning by unfreezing the last 30 layers of the base model
+    
+    if unfreeze_layers > 0:
         base_model.trainable = True
-        for layer in base_model.layers[:-30]:
+        for layer in base_model.layers[:-unfreeze_layers]:
             layer.trainable = False
     else:
-        # Freeze base model entirely for fast CPU training without corrupting pre-trained features on small data
         base_model.trainable = False
-    
+        
     x = base_model(x, training=False)
     x = keras.layers.GlobalAveragePooling2D()(x)
     x = keras.layers.Dense(256, activation="relu")(x)
     x = keras.layers.BatchNormalization()(x)
-    x = keras.layers.Dropout(0.3)(x)
+    x = keras.layers.Dropout(0.35)(x)
     outputs = keras.layers.Dense(num_classes, activation="softmax")(x)
     
     model = keras.Model(inputs, outputs)
     return model
 
-def train_model(quick_demo=True):
-    print(f"Starting training (Quick Demo: {quick_demo})...")
+def train_model(quick_demo=True, is_production=False):
+    """
+    Trains the satellite land cover model.
+    - If is_production=True (or quick_demo=False), trains production model and saves to PROD_MODEL_PATH.
+    - If quick_demo=True and is_production=False, trains trial demo model and saves to DEMO_MODEL_PATH.
+    """
+    target_model_path = PROD_MODEL_PATH if (is_production or not quick_demo) else DEMO_MODEL_PATH
+    target_metrics_path = PROD_METRICS_PATH if (is_production or not quick_demo) else DEMO_METRICS_PATH
+    mode_name = "Production Model" if (is_production or not quick_demo) else "Quick Demo Trial"
     
-    # Load dataset
-    # EuroSAT dataset has train.csv, validation.csv, test.csv
-    if quick_demo:
-        # Load 30 images per class for training, 15 for validation/test for stable assessment
+    print(f"--> Starting {mode_name} training...")
+    
+    if quick_demo and not is_production:
         x_train, y_train = load_data_from_csv("train.csv", sample_size=30)
         x_val, y_val = load_data_from_csv("validation.csv", sample_size=15)
         x_test, y_test = load_data_from_csv("test.csv", sample_size=15)
-        epochs = 4
+        epochs_head = 5
+        epochs_fine = 0
         batch_size = 16
-        lr = 2e-3
-        fine_tune = False
+        lr_head = 1e-3
     else:
-        # Load larger subset for full training (to be feasible on CPU, limit to 200 per class)
-        x_train, y_train = load_data_from_csv("train.csv", sample_size=200)
-        x_val, y_val = load_data_from_csv("validation.csv", sample_size=50)
-        x_test, y_test = load_data_from_csv("test.csv", sample_size=50)
-        epochs = 12
+        # Full or larger balanced subset
+        x_train, y_train = load_data_from_csv("train.csv", sample_size=400)
+        x_val, y_val = load_data_from_csv("validation.csv", sample_size=100)
+        x_test, y_test = load_data_from_csv("test.csv", sample_size=100)
+        epochs_head = 6
+        epochs_fine = 6
         batch_size = 32
-        lr = 5e-4
-        fine_tune = True
+        lr_head = 1e-3
 
-    print(f"Train data shape: {x_train.shape}, Val shape: {x_val.shape}, Test shape: {x_test.shape}")
+    print(f"Dataset Loaded: Train shape={x_train.shape}, Val shape={x_val.shape}, Test shape={x_test.shape}")
     
-    # Create model
-    model = get_model(fine_tune=fine_tune)
-    
-    # Compile
+    # Stage 1: Train Head with frozen base
+    model = build_model(unfreeze_layers=0)
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=lr),
+        optimizer=keras.optimizers.Adam(learning_rate=lr_head),
         loss="sparse_categorical_crossentropy",
         metrics=["accuracy"]
     )
     
-    # Callbacks
     callbacks = [
-        keras.callbacks.EarlyStopping(monitor="val_loss", patience=4, restore_best_weights=True),
-        keras.callbacks.ModelCheckpoint(filepath=MODEL_PATH, save_best_only=True, monitor="val_loss")
+        keras.callbacks.EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
+        keras.callbacks.ModelCheckpoint(filepath=target_model_path, save_best_only=True, monitor="val_loss")
     ]
     
-    # Fit model
-    history = model.fit(
+    history1 = model.fit(
         x_train, y_train,
         validation_data=(x_val, y_val),
-        epochs=epochs,
+        epochs=epochs_head,
         batch_size=batch_size,
         callbacks=callbacks,
         verbose=1
     )
     
-    # Save final model
-    model.save(MODEL_PATH)
-    print("Model saved to", MODEL_PATH)
+    combined_history = {
+        "accuracy": [float(v) for v in history1.history["accuracy"]],
+        "val_accuracy": [float(v) for v in history1.history["val_accuracy"]],
+        "loss": [float(v) for v in history1.history["loss"]],
+        "val_loss": [float(v) for v in history1.history["val_loss"]]
+    }
+    
+    # Stage 2: Fine-Tuning top 30 layers if requested
+    if epochs_fine > 0:
+        print("--> Stage 2: Fine-tuning top layers of ResNet50V2...")
+        model = build_model(unfreeze_layers=30)
+        # Load best weights from Stage 1
+        model.load_weights(target_model_path)
+        
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-5),
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"]
+        )
+        
+        callbacks_fine = [
+            keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2),
+            keras.callbacks.EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True),
+            keras.callbacks.ModelCheckpoint(filepath=target_model_path, save_best_only=True, monitor="val_loss")
+        ]
+        
+        history2 = model.fit(
+            x_train, y_train,
+            validation_data=(x_val, y_val),
+            epochs=epochs_fine,
+            batch_size=batch_size,
+            callbacks=callbacks_fine,
+            verbose=1
+        )
+        
+        for k in combined_history:
+            combined_history[k].extend([float(v) for v in history2.history[k]])
+            
+    # Save final best model
+    model.save(target_model_path)
+    print(f"Model saved to {target_model_path}")
     
     # Evaluate on test set
-    y_pred_probs = model.predict(x_test)
+    y_pred_probs = model.predict(x_test, verbose=0)
     y_pred = np.argmax(y_pred_probs, axis=1)
     
-    test_accuracy = accuracy_score(y_test, y_pred)
-    
-    # Calculate Precision, Recall, F1 (weighted)
+    test_acc = accuracy_score(y_test, y_pred)
     precision, recall, f1, _ = precision_recall_fscore_support(y_test, y_pred, average="weighted", zero_division=0)
+    per_class_prec, per_class_rec, per_class_f1, _ = precision_recall_fscore_support(y_test, y_pred, average=None, zero_division=0)
     
-    # Confusion Matrix
     cm = confusion_matrix(y_test, y_pred, labels=list(range(10)))
     
+    per_class_metrics = {}
+    for idx, cname in enumerate(CLASSES):
+        per_class_metrics[cname] = {
+            "precision": f"{per_class_prec[idx]*100:.1f}%",
+            "recall": f"{per_class_rec[idx]*100:.1f}%",
+            "f1": f"{per_class_f1[idx]*100:.1f}%"
+        } if idx < len(per_class_prec) else {}
+
     metrics = {
-        "accuracy": f"{test_accuracy * 100:.1f}%",
+        "evaluated": True,
+        "is_production": (is_production or not quick_demo),
+        "accuracy": f"{test_acc * 100:.1f}%",
         "precision": f"{precision * 100:.1f}%",
         "recall": f"{recall * 100:.1f}%",
         "f1_score": f"{f1 * 100:.1f}%",
         "confusion_matrix": cm.tolist(),
-        "history": {
-            "accuracy": [float(val) for val in history.history["accuracy"]],
-            "val_accuracy": [float(val) for val in history.history["val_accuracy"]],
-            "loss": [float(val) for val in history.history["loss"]],
-            "val_loss": [float(val) for val in history.history["val_loss"]]
-        }
+        "per_class_metrics": per_class_metrics,
+        "history": combined_history,
+        "test_samples": len(y_test),
+        "train_samples": len(y_train)
     }
     
-    # Save metrics
-    with open(METRICS_PATH, "w") as f:
+    with open(target_metrics_path, "w") as f:
         json.dump(metrics, f, indent=4)
         
-    print("Metrics saved to", METRICS_PATH)
+    print(f"Metrics saved to {target_metrics_path}")
     return metrics
 
-def get_default_metrics():
-    # If metrics.json doesn't exist, we can create some default ones so the dashboard is not empty
-    if os.path.exists(METRICS_PATH):
+def get_production_metrics():
+    """
+    Returns saved production model metrics. Returns unevaluated dictionary if missing (NO FAKE METRICS!).
+    """
+    if os.path.exists(PROD_METRICS_PATH):
         try:
-            with open(METRICS_PATH, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-            
-    # Fallback default mock/pre-saved metrics for display
-    default_cm = np.zeros((10, 10), dtype=int)
-    for i in range(10):
-        default_cm[i, i] = 10  # Mock diagonal elements
-        
-    metrics = {
-        "accuracy": "94.2%",
-        "precision": "94.5%",
-        "recall": "94.2%",
-        "f1_score": "94.3%",
-        "confusion_matrix": default_cm.tolist(),
-        "history": {
-            "accuracy": [0.65, 0.78, 0.85, 0.90, 0.94],
-            "val_accuracy": [0.70, 0.81, 0.86, 0.91, 0.94],
-            "loss": [1.2, 0.7, 0.45, 0.3, 0.2],
-            "val_loss": [1.0, 0.65, 0.42, 0.28, 0.22]
-        }
-    }
-    
-    # Try to generate model if model file doesn't exist
-    if not os.path.exists(MODEL_PATH):
-        try:
-            model = get_model()
-            model.save(MODEL_PATH)
+            with open(PROD_METRICS_PATH, "r") as f:
+                data = json.load(f)
+                data["evaluated"] = True
+                return data
         except Exception as e:
-            print("Error saving dummy model:", e)
+            print("Error loading metrics:", e)
             
-    return metrics
+    return {
+        "evaluated": False,
+        "message": "Production model evaluation metrics unavailable. Please run production model training to evaluate."
+    }
 
 if __name__ == "__main__":
-    # Test training
-    train_model(quick_demo=True)
+    train_model(quick_demo=True, is_production=True)

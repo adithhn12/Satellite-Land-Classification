@@ -47,6 +47,14 @@ def api_train():
         
         is_prod = (mode == "production") or (not quick)
         
+        # Check if EuroSAT dataset is available
+        dataset_csv = os.path.join(tr.DATASET_DIR, "train.csv")
+        if not os.path.exists(dataset_csv):
+            return jsonify({
+                "status": "error",
+                "message": "Model training is supported only in local development environments with the full EuroSAT dataset installed. The production service uses the pre-trained ResNet50V2 model."
+            }), 400
+        
         metrics = tr.train_model(quick_demo=not is_prod, is_production=is_prod)
         
         # Invalidate cached model

@@ -624,6 +624,13 @@ function App() {
                     </div>
 
                   </div>
+
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 text-xs text-amber-800 flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="leading-relaxed">
+                      <strong className="font-semibold text-amber-900">Environment Requirement:</strong> Model training requires the 2GB EuroSAT dataset installed in local development environments. In cloud production deployments, training is disabled and the web application uses the pre-trained ResNet50V2 model.
+                    </div>
+                  </div>
                 </div>
 
                 {/* EuroSAT Classes Checklist Card */}
